@@ -111,10 +111,13 @@ impl<M: Model> Simulator<M> {
         .await;
 
         if error_catcher.is_err() {
-            let data = self.model.snapshot();
-            output_frame(&queue_transmitter, OutputFrameType::Abort, t, data)
-                .await
-                .unwrap();
+            // send 5 packets to minimize chance of it being lost.
+            for _ in 0..5 {
+                let data = self.model.snapshot();
+                output_frame(&queue_transmitter, OutputFrameType::Abort, t, data)
+                    .await
+                    .unwrap();
+            }
         }
 
         error_catcher
