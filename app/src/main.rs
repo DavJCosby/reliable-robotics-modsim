@@ -12,9 +12,8 @@ use std::time::Duration;
 #[tokio::main]
 pub async fn main() {
     let args = HydraulicModelCLIArgs::parse();
-    let events = args.events;
 
-    let model = model::make_default_model(events).unwrap();
+    let model = model::make_default_model().unwrap();
     let clock = RealtimeClock::new(Duration::from_millis(100));
     let print_target = PrintlnTarget;
     let udp_target = UDPTarget::new("127.0.0.1:0", "127.0.0.1:9000")
@@ -22,7 +21,8 @@ pub async fn main() {
         .unwrap();
 
     let mut sim = Simulator::builder()
-        .model(Box::new(model))
+        .model(model)
+        .events(args.into_events())
         .clock(Box::new(clock))
         .output_targets(vec![Box::new(print_target), Box::new(udp_target)])
         .sim_length(Duration::from_secs(60))

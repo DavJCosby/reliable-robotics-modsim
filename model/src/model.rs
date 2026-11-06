@@ -1,30 +1,14 @@
-use std::{collections::VecDeque, ops::Div, time::Duration};
+use std::{ops::Div, time::Duration};
 
-use serde::Serialize;
-use simulator::{Error, OutputFrameData};
+use crate::output_data::{HydraulicsOutputData, ValveState};
+use simulator::Error;
 use uom::si::{
-    f64::{Pressure, Volume, VolumeRate},
+    f64::{Pressure, Time, Volume, VolumeRate},
     pressure::bar,
+    time::second,
     volume::liter,
     volume_rate::liter_per_second,
 };
-
-#[derive(Debug, Serialize)]
-pub enum ValveState {
-    NaturallyOpen,
-    NaturallyClosed,
-    TriggeredOpen,
-    TriggeredClose,
-}
-
-#[derive(Debug, Serialize)]
-pub struct HydraulicsOutputData {
-    // for each pipe, the valve state and whether hardware control is needed
-    pub valve_states: Vec<ValveState>,
-    // tank order, in bar
-    pub tank_pressures_bar: Vec<f64>,
-}
-impl OutputFrameData for HydraulicsOutputData {}
 
 pub enum ValveFlow {
     OneWay,
@@ -74,18 +58,9 @@ pub struct TankId(pub(crate) usize);
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Eq, Hash)]
 pub struct PipeId(pub(crate) usize);
 
-#[derive(Clone, Debug)]
-pub struct ScheduledValveEvent {
-    pub at: Duration,
-    pub pipe: PipeId,
-    pub open: bool,
-}
-
-impl std::str::FromStr for PipeId {
-    type Err = std::num::ParseIntError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse().map(Self)
+impl From<usize> for PipeId {
+    fn from(value: usize) -> Self {
+        Self(value)
     }
 }
 
@@ -175,15 +150,12 @@ pub struct HydraulicsModel {
     pub(crate) bulk_modulus: Pressure,
     pub(crate) tanks: Vec<Tank>,
     pub(crate) pipes: Vec<Pipe>,
-    // easier to pop events off the front of the schedule if it's a double ended queue
-    pub(crate) event_schedule: VecDeque<ScheduledValveEvent>,
 }
 
 pub struct HydraulicsModelBuilder {
     bulk_modulus: Option<Pressure>,
     tanks: Vec<Tank>,
     pipes: Vec<Pipe>,
-    event_schedule: VecDeque<ScheduledValveEvent>,
 }
 
 impl Default for HydraulicsModelBuilder {
@@ -198,7 +170,6 @@ impl HydraulicsModelBuilder {
             bulk_modulus: None,
             tanks: Vec::new(),
             pipes: Vec::new(),
-            event_schedule: VecDeque::new(),
         }
     }
 
@@ -225,36 +196,6 @@ impl HydraulicsModelBuilder {
         Ok(PipeId(self.pipes.len() - 1))
     }
 
-    pub fn set_event_schedule(
-        &mut self,
-        mut events: Vec<ScheduledValveEvent>,
-    ) -> Result<(), Error> {
-        for event in &events {
-            let pipe = self.pipes.get(event.pipe.0).ok_or_else(|| {
-                Error::Model(format!(
-                    "Scheduled event refers to invalid pipe {}",
-                    event.pipe.0
-                ))
-            })?;
-
-            match pipe.control {
-                ValveControl::Triggered(_) => {}
-                _ => {
-                    return Err(Error::Model(format!(
-                        "Cannot manually trigger pipe {}: valve is not a triggered valve",
-                        event.pipe.0
-                    )));
-                }
-            }
-        }
-
-        // keep input order for events at the same time
-        events.sort_by_key(|event| event.at);
-        self.event_schedule = events.into();
-
-        Ok(())
-    }
-
     pub fn build(self) -> Result<HydraulicsModel, Error> {
         if let Some(bm) = self.bulk_modulus {
             Ok(HydraulicsModel {
@@ -262,12 +203,126 @@ impl HydraulicsModelBuilder {
                 bulk_modulus: bm,
                 tanks: self.tanks,
                 pipes: self.pipes,
-                event_schedule: self.event_schedule,
             })
         } else {
             Err(Error::Model(
                 "Failed to provide a bulk modulus.".to_string(),
             ))
         }
+    }
+}
+
+impl simulator::Model for HydraulicsModel {
+    type Output = HydraulicsOutputData;
+
+    fn snapshot(&self) -> Self::Output {
+        HydraulicsOutputData {
+            valve_states: self
+                .pipes
+                .iter()
+                .map(|pipe| match &pipe.control {
+                    ValveControl::Triggered(true) => ValveState::TriggeredOpen,
+                    ValveControl::Triggered(false) => ValveState::TriggeredClose,
+                    ValveControl::PressureRelief { state: true, .. } => ValveState::NaturallyOpen,
+                    ValveControl::PressureRelief { state: false, .. } => {
+                        ValveState::NaturallyClosed
+                    }
+                })
+                .collect(),
+            tank_pressures_bar: self
+                .tanks
+                .iter()
+                .map(|tank| tank.pressure.get::<bar>())
+                .collect(),
+        }
+    }
+
+    fn init(&mut self) -> Result<(), simulator::Error> {
+        let bm = self.bulk_modulus.get::<bar>();
+        if !bm.is_finite() || bm <= 0.0 {
+            return Err(Error::Model(
+                "Bulk modulus must be finite and positive.".to_string(),
+            ));
+        }
+
+        for tank in &self.tanks {
+            tank.validate()?;
+        }
+
+        for pipe in &self.pipes {
+            pipe.validate(self.tanks.len())?;
+        }
+
+        self.last_time = Some(Duration::ZERO);
+
+        Ok(())
+    }
+
+    fn step(&mut self, t: &std::time::Duration) -> Result<(), simulator::Error> {
+        let previous = self
+            .last_time
+            .ok_or_else(|| Error::Model("step() called before init()".into()))?;
+
+        let dt = t
+            .checked_sub(previous)
+            .ok_or_else(|| Error::Model("Simulation time moved backwards".into()))?
+            .as_secs_f64();
+
+        // can happen if we call after already handling physics for an event scheduled for right on the timestamp we're already at
+        if dt == 0.0 {
+            return Ok(());
+        }
+
+        let dt = Time::new::<second>(dt);
+
+        // take a snapshot of current pressures, don't want pressure changes from early pipes in the loop to effect downstream calculations for this timestamp.
+        let pressures: Vec<Pressure> = self.tanks.iter().map(|tank| tank.pressure).collect();
+        let zero_flow = VolumeRate::new::<liter_per_second>(0.0);
+        let mut net_inflow = vec![zero_flow; self.tanks.len()];
+
+        for pipe in &mut self.pipes {
+            let a = pipe.a.0;
+            let b = pipe.b.0;
+
+            // only modifies stuff if it's a pressure relief valve
+            pipe.handle_pressure_relief(pressures[a]);
+
+            if !pipe.is_open() {
+                continue;
+            }
+
+            let mut q = pipe.conductance * (pressures[a] - pressures[b]);
+
+            if let ValveFlow::OneWay = pipe.flow
+                && q < zero_flow
+            {
+                q = zero_flow;
+            }
+
+            net_inflow[a] -= q;
+            net_inflow[b] += q;
+        }
+
+        for (i, tank) in self.tanks.iter_mut().enumerate() {
+            let p = pressures[i] + dt * self.bulk_modulus / tank.volume * net_inflow[i];
+
+            if !p.is_finite() {
+                return Err(Error::Model(format!("Non-finite pressure in tank {i}")));
+            }
+
+            tank.pressure = p;
+        }
+
+        self.last_time = Some(*t);
+
+        Ok(())
+    }
+
+    fn end(&mut self) -> Result<(), simulator::Error> {
+        self.last_time
+            .take()
+            .ok_or_else(|| Error::Model("end() called before init() or after end()".to_string()))?;
+
+        Ok(())
     }
 }
