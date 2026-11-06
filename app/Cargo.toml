@@ -1,0 +1,10 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+simulator.workspace = true
+model.workspace = true
+tokio.workspace = true
+clap.workspace = true
