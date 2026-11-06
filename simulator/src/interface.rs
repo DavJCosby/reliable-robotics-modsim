@@ -17,8 +17,6 @@ pub enum Error {
     #[error("The simulation's clock reported an error: {0}")]
     Clock(String),
 
-    // #[error("An error occurred during model initialization.")]
-    // ModelInit,
     #[error(
         "Attempt to transfer ownership of OutputTargets to worker task a second time; implies we already started output."
     )]

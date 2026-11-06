@@ -229,11 +229,6 @@ impl simulator::Model for HydraulicsModel {
                     }
                 })
                 .collect(),
-            tank_pressures_bar: self
-                .tanks
-                .iter()
-                .map(|tank| tank.pressure.get::<bar>())
-                .collect(),
         }
     }
 
