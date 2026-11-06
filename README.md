@@ -1,4 +1,4 @@
-From `.app`:
+From `/app`:
 
 ```sh
 cargo run --release -- --event "2s:0=open" --event "15s:0=closed"
