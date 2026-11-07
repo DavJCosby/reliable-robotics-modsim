@@ -31,13 +31,13 @@ pub trait Model {
 
     fn init(&mut self) -> Result<(), Error>;
     fn step(&mut self, t: &Duration) -> Result<(), Error>;
-    // TODO: determine whether &mut self is truly necessary
+
     fn validate(&mut self, _t: &Duration) -> Result<(), Error> {
         println!("No validator provided, passes by default.");
         Ok(())
     }
     fn end(&mut self) -> Result<(), Error>;
-    /// Must remain available before initialization and after a lifecycle or event error.
+
     fn snapshot(&self) -> Self::Output;
 }
 
@@ -57,7 +57,6 @@ pub struct ScheduledEvent<E> {
 pub trait Clock {
     fn start(&mut self) -> Result<(), Error>;
     async fn tick(&mut self) -> Result<Duration, Error>;
-    // fn elapsed(&mut self) -> Duration;
     fn end(&mut self) -> Result<(), Error>;
 }
 
@@ -79,6 +78,6 @@ pub struct OutputFrame<OutputData: OutputFrameData> {
 }
 
 #[async_trait]
-pub trait OutputTarget<OutputData: OutputFrameData>: Send + Sync {
-    async fn send(&mut self, data: &OutputFrame<OutputData>) -> Result<(), Error>;
+pub trait OutputTarget<D: OutputFrameData>: Send + Sync {
+    async fn send(&mut self, data: &OutputFrame<D>) -> Result<(), Error>;
 }
